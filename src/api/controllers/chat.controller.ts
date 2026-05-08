@@ -1,4 +1,5 @@
 import {
+  AddOrEditContactDto,
   ArchiveChatDto,
   BlockUserDto,
   DecryptPollVoteDto,
@@ -42,6 +43,10 @@ export class ChatController {
 
   public async markChatUnread({ instanceName }: InstanceDto, data: MarkChatUnreadDto) {
     return await this.waMonitor.waInstances[instanceName].markChatUnread(data);
+  }
+
+  public async addOrEditContact({ instanceName }: InstanceDto, data: AddOrEditContactDto) {
+    return await this.waMonitor.waInstances[instanceName].addOrEditContact(data);
   }
 
   public async deleteMessage({ instanceName }: InstanceDto, data: DeleteMessage) {

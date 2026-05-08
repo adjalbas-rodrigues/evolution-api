@@ -140,6 +140,20 @@ export const markChatUnreadSchema: JSONSchema7 = {
   required: ['lastMessage'],
 };
 
+export const addOrEditContactSchema: JSONSchema7 = {
+  $id: v4(),
+  type: 'object',
+  properties: {
+    number: { type: 'string', minLength: 1 },
+    fullName: { type: 'string', minLength: 1 },
+    firstName: { type: 'string' },
+    lidJid: { type: 'string', pattern: '^[0-9]+(:[0-9]+)?@lid$' },
+    saveOnPrimaryAddressbook: { type: 'boolean' },
+  },
+  required: ['number', 'fullName'],
+  ...isNotEmpty('number', 'fullName'),
+};
+
 export const deleteMessageSchema: JSONSchema7 = {
   $id: v4(),
   type: 'object',

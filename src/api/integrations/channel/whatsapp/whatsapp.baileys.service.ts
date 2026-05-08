@@ -1,6 +1,7 @@
 import { getCollectionsDto } from '@api/dto/business.dto';
 import { OfferCallDto } from '@api/dto/call.dto';
 import {
+  AddOrEditContactDto,
   ArchiveChatDto,
   BlockUserDto,
   DeleteMessage,
@@ -4274,6 +4275,70 @@ export class BaileysStartupService extends ChannelStartupService {
       throw new InternalServerErrorException({
         archived: false,
         message: ['An error occurred while archiving the chat. Open a calling.', error.toString()],
+      });
+    }
+  }
+
+  /**
+   * Add or edit a contact in the connected account's address book.
+   *
+   * Uses Baileys' `chatModify({contact})` which dispatches a
+   * `critical_unblock_low` app-state patch. The patch propagates to all of
+   * the user's other linked devices (WA Web, Desktop, mobile) and persists
+   * in WhatsApp's server-side address book — exactly the same operation as
+   * tapping "Save to contacts" inside WA Web.
+   *
+   * The contact's LID is required for the patch to be honored. When the
+   * caller omits `lidJid`, this method resolves it via Baileys'
+   * `signalRepository.lidMapping.getLIDForPN`.
+   *
+   * Note: requires the Baileys session to have all `app-state-sync-keys`.
+   * If the original pair missed an `app-state-sync-key-share` message, the
+   * patch will be dispatched but the server-side decode will fail. The fix
+   * is to re-pair the instance.
+   */
+  public async addOrEditContact(data: AddOrEditContactDto) {
+    const pnJid = createJid(data.number);
+
+    let lidJid = data.lidJid;
+    if (!lidJid) {
+      try {
+        const resolved = await this.client.signalRepository.lidMapping.getLIDForPN(pnJid);
+        if (resolved) lidJid = resolved;
+      } catch {
+        // best-effort — if the LID can't be resolved, the patch may still
+        // succeed (WA derives it server-side) but reliability is lower.
+      }
+    }
+
+    try {
+      await this.client.chatModify(
+        {
+          contact: {
+            fullName: data.fullName,
+            firstName: data.firstName ?? data.fullName.split(' ')[0],
+            lidJid,
+            pnJid,
+            saveOnPrimaryAddressbook: data.saveOnPrimaryAddressbook ?? true,
+          },
+        },
+        pnJid,
+      );
+
+      return {
+        success: true,
+        contact: {
+          number: data.number,
+          fullName: data.fullName,
+          firstName: data.firstName ?? data.fullName.split(' ')[0],
+          pnJid,
+          lidJid,
+        },
+      };
+    } catch (error) {
+      throw new InternalServerErrorException({
+        success: false,
+        message: ['Failed to add or edit contact', error?.toString()],
       });
     }
   }
