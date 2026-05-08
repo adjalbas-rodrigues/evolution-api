@@ -158,7 +158,12 @@ import { PassThrough, Readable } from 'stream';
 import { v4 } from 'uuid';
 
 import { BaileysMessageProcessor } from './baileysMessage.processor';
-import { buildInteractiveBizNode, buildListBizNode, toNativeFlowButton } from './helpers/interactiveMessage.helper';
+import {
+  buildInteractiveBizNode,
+  buildListBizNode,
+  buildPixBizNode,
+  toNativeFlowButton,
+} from './helpers/interactiveMessage.helper';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
 export interface ExtendedIMessageKey extends proto.IMessageKey {
@@ -2418,13 +2423,29 @@ export class BaileysStartupService extends ChannelStartupService {
     if (messageId) option.messageId = messageId;
 
     if (message['viewOnceMessage'] || message['interactiveMessage'] || message['listMessage']) {
+      // LID routing for nativeFlow interactive messages: recipient devices
+      // may have LID-only sessions and PN-routed PIX/buttons silently fail
+      // to deliver. Resolve the LID JID via Baileys' lidMapping and use it
+      // as the target for relayMessage. Keep PN as the local key so the
+      // sender's other devices render the message normally and our DB
+      // continues to index by PN.
+      let target = sender;
+      if (message['interactiveMessage']?.['nativeFlowMessage'] && !isJidGroup(sender) && !sender.endsWith('@lid')) {
+        try {
+          const lid = await this.client.signalRepository.lidMapping.getLIDForPN(sender);
+          if (lid) target = lid;
+        } catch {
+          // fall back to PN routing — better to try delivery than to throw
+        }
+      }
+
       const m = generateWAMessageFromContent(sender, message, {
         timestamp: new Date(),
         userJid: this.instance.wuid,
         messageId,
         quoted,
       });
-      const id = await this.client.relayMessage(sender, message, {
+      const id = await this.client.relayMessage(target, message, {
         messageId,
         ...(additionalNodes?.length ? { additionalNodes } : {}),
       });
@@ -3610,20 +3631,16 @@ export class BaileysStartupService extends ChannelStartupService {
       reply: () => toString({ display_text: button.displayText, id: button.id }),
       copy: () => toString({ display_text: button.displayText, copy_code: button.copyCode }),
       url: () => toString({ display_text: button.displayText, url: button.url, merchant_url: button.url }),
+      // PIX with value via review_and_pay button. Format captured from
+      // WA Web's actual plaintext bytes (Playwright + crypto.subtle hook,
+      // 2026-05-08). Don't add `order` field, `share_payment_status`,
+      // `tax/shipping/discount`, or `messageVersion:1` — recipient phone
+      // degrades to static-card render or shows "cannot load" with those.
       pix: () =>
         toString({
-          currency: button.currency,
-          total_amount: { value: 0, offset: 100 },
-          reference_id: this.generateRandomId(),
+          reference_id: button.referenceId || this.generateRandomId(),
           type: 'physical-goods',
-          order: {
-            status: 'pending',
-            subtotal: { value: 0, offset: 100 },
-            order_type: 'ORDER',
-            items: [
-              { name: '', amount: { value: 0, offset: 100 }, quantity: 0, sale_amount: { value: 0, offset: 100 } },
-            ],
-          },
+          payment_configuration: 'merchant_categorization_code',
           payment_settings: [
             {
               type: 'pix_static_code',
@@ -3634,7 +3651,12 @@ export class BaileysStartupService extends ChannelStartupService {
               },
             },
           ],
-          share_payment_status: false,
+          currency: button.currency || 'BRL',
+          total_amount: {
+            value: button.amount ? Math.round(button.amount * 1000) : 0,
+            offset: 1000,
+          },
+          order_request_id: button.orderRequestId || this.generateRandomId(),
         }),
     };
 
@@ -3689,12 +3711,15 @@ export class BaileysStartupService extends ChannelStartupService {
         throw new BadRequestException('PIX button cannot be mixed with other button types');
       }
 
+      // PIX with value: name='review_and_pay' (NOT 'payment_info') + biz
+      // additionalNode with native_flow_name='order_details'. Both required
+      // for recipient phone to render the "Pagar R$ X,XX" button.
       const message: proto.IMessage = {
         interactiveMessage: {
           nativeFlowMessage: {
             buttons: [
               {
-                name: this.mapType.get('pix'),
+                name: 'review_and_pay',
                 buttonParamsJson: this.toJSONString(data.buttons[0]),
               },
             ],
@@ -3717,7 +3742,7 @@ export class BaileysStartupService extends ChannelStartupService {
           mentioned: data?.mentioned,
         },
         false,
-        [buildInteractiveBizNode()],
+        [buildPixBizNode('order_details')],
       );
     }
 
