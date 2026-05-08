@@ -1,5 +1,6 @@
 import { RouterBroker } from '@api/abstract/abstract.router';
 import {
+  AddOrEditContactDto,
   ArchiveChatDto,
   BlockUserDto,
   DecryptPollVoteDto,
@@ -22,6 +23,7 @@ import { Query } from '@api/repository/repository.service';
 import { chatController } from '@api/server.module';
 import { Contact, Message, MessageUpdate } from '@prisma/client';
 import {
+  addOrEditContactSchema,
   archiveChatSchema,
   blockUserSchema,
   contactValidateSchema,
@@ -90,6 +92,16 @@ export class ChatRouter extends RouterBroker {
           schema: archiveChatSchema,
           ClassRef: ArchiveChatDto,
           execute: (instance, data) => chatController.archiveChat(instance, data),
+        });
+
+        return res.status(HttpStatus.CREATED).json(response);
+      })
+      .post(this.routerPath('addOrEditContact'), ...guards, async (req, res) => {
+        const response = await this.dataValidate<AddOrEditContactDto>({
+          request: req,
+          schema: addOrEditContactSchema,
+          ClassRef: AddOrEditContactDto,
+          execute: (instance, data) => chatController.addOrEditContact(instance, data),
         });
 
         return res.status(HttpStatus.CREATED).json(response);

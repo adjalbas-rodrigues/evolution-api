@@ -90,6 +90,19 @@ export class MarkChatUnreadDto {
   chat?: string;
 }
 
+export class AddOrEditContactDto {
+  /** Phone number (with or without country code) or full PN JID of the contact */
+  number: string;
+  /** Full name (e.g. "First Last") — stored as the WA address-book name */
+  fullName: string;
+  /** Display/push name (typically the first name) */
+  firstName?: string;
+  /** Optional pre-known LID JID. If omitted, the service resolves it via Baileys' lidMapping. */
+  lidJid?: string;
+  /** Save in the user's primary address book (default true). */
+  saveOnPrimaryAddressbook?: boolean;
+}
+
 export class PrivacySettingDto {
   readreceipts: WAReadReceiptsValue;
   profile: WAPrivacyValue;
