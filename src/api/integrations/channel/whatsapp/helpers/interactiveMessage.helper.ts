@@ -28,6 +28,20 @@ export function buildListBizNode(): BinaryNode {
   };
 }
 
+/**
+ * Biz node for PIX `review_and_pay` button. WA recipient phone requires
+ * `native_flow_name: 'order_details'` attribute on the biz node — without
+ * it the message is silently dropped or rendered as a static merchant card
+ * with no value. Discovered by capturing WA Web's plaintext bytes via
+ * Playwright + crypto.subtle.encrypt hook (2026-05-08, 22 attempts).
+ *
+ * For PIX without value (kept for backward compat with `payment_info` flow),
+ * pass `'payment_info'` as the name. For PIX with value, use `'order_details'`.
+ */
+export function buildPixBizNode(name: 'order_details' | 'payment_info' = 'order_details'): BinaryNode {
+  return { tag: 'biz', attrs: { native_flow_name: name } };
+}
+
 type NativeFlowButton = { name: string; buttonParamsJson: string };
 
 type NativeFlowDeps = {

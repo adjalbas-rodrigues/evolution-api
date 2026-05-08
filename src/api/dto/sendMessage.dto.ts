@@ -112,6 +112,10 @@ export class Button {
   name?: string;
   keyType?: KeyType;
   key?: string;
+  // PIX with value (review_and_pay button)
+  amount?: number;
+  referenceId?: string;
+  orderRequestId?: string;
 }
 
 export class SendButtonsDto extends Metadata {
