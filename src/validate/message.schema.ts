@@ -413,7 +413,7 @@ export const buttonsMessageSchema: JSONSchema7 = {
         properties: {
           type: {
             type: 'string',
-            enum: ['reply', 'copy', 'url', 'call', 'pix'],
+            enum: ['reply', 'copy', 'url', 'call', 'pix', 'pix_copy'],
           },
           displayText: { type: 'string' },
           id: { type: 'string' },

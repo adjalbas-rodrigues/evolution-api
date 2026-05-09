@@ -3659,6 +3659,27 @@ export class BaileysStartupService extends ChannelStartupService {
           },
           order_request_id: button.orderRequestId || this.generateRandomId(),
         }),
+      // pix_copy: static PIX card (payment_info) — shows PIX icon with
+      // merchant/key data for the recipient to view and copy. No payment flow.
+      pix_copy: () =>
+        toString({
+          reference_id: this.generateRandomId(),
+          type: 'physical-goods',
+          payment_configuration: 'merchant_categorization_code',
+          payment_settings: [
+            {
+              type: 'pix_static_code',
+              pix_static_code: {
+                merchant_name: button.name,
+                key: button.key,
+                key_type: this.mapKeyType.get(button.keyType),
+              },
+            },
+          ],
+          currency: button.currency || 'BRL',
+          total_amount: { value: 0, offset: 1000 },
+          order_request_id: this.generateRandomId(),
+        }),
     };
 
     return json[button.type]?.() || '';
@@ -3670,6 +3691,7 @@ export class BaileysStartupService extends ChannelStartupService {
     ['url', 'cta_url'],
     ['call', 'cta_call'],
     ['pix', 'payment_info'],
+    ['pix_copy', 'payment_info'],
   ]);
 
   private readonly mapKeyType = new Map<KeyType, string>([
@@ -3687,6 +3709,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
     const hasReplyButtons = data.buttons.some((btn) => btn.type === 'reply');
     const hasPixButton = data.buttons.some((btn) => btn.type === 'pix');
+    const hasPixCopyButton = data.buttons.some((btn) => btn.type === 'pix_copy');
     const hasCTAButtons = data.buttons.some((btn) => btn.type === 'url' || btn.type === 'call' || btn.type === 'copy');
 
     /* =========================
@@ -3744,6 +3767,44 @@ export class BaileysStartupService extends ChannelStartupService {
         },
         false,
         [buildPixBizNode('order_details')],
+      );
+    }
+
+    // PIX copy — static card with PIX icon, no interactive payment flow
+    if (hasPixCopyButton) {
+      if (data.buttons.length > 1) {
+        throw new BadRequestException('Only one pix_copy button is allowed');
+      }
+
+      const message: proto.IMessage = {
+        interactiveMessage: {
+          nativeFlowMessage: {
+            buttons: [
+              {
+                name: 'payment_info',
+                buttonParamsJson: this.toJSONString(data.buttons[0]),
+              },
+            ],
+            messageParamsJson: JSON.stringify({
+              from: 'api',
+              templateId: v4(),
+            }),
+          },
+        },
+      };
+
+      return await this.sendMessageWithTyping(
+        data.number,
+        message,
+        {
+          delay: data?.delay,
+          presence: 'composing',
+          quoted: data?.quoted,
+          mentionsEveryOne: data?.mentionsEveryOne,
+          mentioned: data?.mentioned,
+        },
+        false,
+        [buildPixBizNode('payment_info')],
       );
     }
 
