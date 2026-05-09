@@ -5350,6 +5350,17 @@ export class BaileysStartupService extends ChannelStartupService {
       messageRaw.status = status[3]; // DELIVERED MESSAGE
     }
 
+    // Hoist reply contextInfo (stanzaId, quotedMessage, participant) from any
+    // message type into the top-level contextInfo so downstream consumers
+    // (socket, webhook, Chatwoot, n8n) always find it in the same place.
+    for (const key of Object.keys(messageRaw.message)) {
+      const inner = messageRaw.message[key]?.contextInfo;
+      if (inner?.stanzaId) {
+        messageRaw.contextInfo = { ...(messageRaw.contextInfo ?? {}), ...inner };
+        break;
+      }
+    }
+
     if (messageRaw.message.extendedTextMessage) {
       messageRaw.messageType = 'conversation';
       messageRaw.message.conversation = messageRaw.message.extendedTextMessage.text;
@@ -5357,6 +5368,10 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (messageRaw.message.documentWithCaptionMessage) {
+      const innerCtx = messageRaw.message.documentWithCaptionMessage.message?.documentMessage?.contextInfo;
+      if (innerCtx?.stanzaId) {
+        messageRaw.contextInfo = { ...(messageRaw.contextInfo ?? {}), ...innerCtx };
+      }
       messageRaw.messageType = 'documentMessage';
       messageRaw.message.documentMessage = messageRaw.message.documentWithCaptionMessage.message.documentMessage;
       delete messageRaw.message.documentWithCaptionMessage;
