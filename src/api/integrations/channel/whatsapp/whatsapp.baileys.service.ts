@@ -3712,16 +3712,21 @@ export class BaileysStartupService extends ChannelStartupService {
         throw new BadRequestException('PIX button cannot be mixed with other button types');
       }
 
-      // PIX with value: name='review_and_pay' (NOT 'payment_info') + biz
-      // additionalNode with native_flow_name='order_details'. Both required
-      // for recipient phone to render the "Pagar R$ X,XX" button.
+      // PIX with value: review_and_pay + order_details renders "Pagar R$ X,XX".
+      // PIX without value: payment_info renders a static PIX card the
+      // recipient can tap to view/copy the key — no interactive payment flow.
+      const pixButton = data.buttons[0];
+      const hasAmount = pixButton.amount && pixButton.amount > 0;
+      const buttonName = hasAmount ? 'review_and_pay' : 'payment_info';
+      const bizNodeName = hasAmount ? 'order_details' : 'payment_info';
+
       const message: proto.IMessage = {
         interactiveMessage: {
           nativeFlowMessage: {
             buttons: [
               {
-                name: 'review_and_pay',
-                buttonParamsJson: this.toJSONString(data.buttons[0]),
+                name: buttonName,
+                buttonParamsJson: this.toJSONString(pixButton),
               },
             ],
             messageParamsJson: JSON.stringify({
@@ -3743,7 +3748,7 @@ export class BaileysStartupService extends ChannelStartupService {
           mentioned: data?.mentioned,
         },
         false,
-        [buildPixBizNode('order_details')],
+        [buildPixBizNode(bizNodeName)],
       );
     }
 
