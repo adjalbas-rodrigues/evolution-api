@@ -7,6 +7,8 @@ import { AuthenticationState, BufferJSON, initAuthCreds, WAProto as proto } from
 import fs from 'fs/promises';
 import path from 'path';
 
+const logger = new Logger('useMultiFileAuthStatePrisma');
+
 const fixFileName = (file: string): string | undefined => {
   if (!file) {
     return undefined;
@@ -20,7 +22,8 @@ export async function keyExists(sessionId: string): Promise<any> {
   try {
     const key = await prismaRepository.session.findUnique({ where: { sessionId: sessionId } });
     return !!key;
-  } catch {
+  } catch (err) {
+    logger.error({ where: 'keyExists', sessionId, err: err?.message ?? String(err), stack: err?.stack });
     return false;
   }
 }
@@ -39,7 +42,17 @@ export async function saveKey(sessionId: string, keyJson: any): Promise<any> {
       where: { sessionId: sessionId },
       data: { creds: JSON.stringify(keyJson) },
     });
-  } catch {
+  } catch (err) {
+    logger.error({
+      where: 'saveKey',
+      sessionId,
+      keyJsonType: typeof keyJson,
+      keyJsonLen: typeof keyJson === 'string' ? keyJson.length : null,
+      err: err?.message ?? String(err),
+      code: (err as any)?.code,
+      meta: (err as any)?.meta,
+      stack: err?.stack,
+    });
     return null;
   }
 }
@@ -50,7 +63,8 @@ export async function getAuthKey(sessionId: string): Promise<any> {
     if (!register) return null;
     const auth = await prismaRepository.session.findUnique({ where: { sessionId: sessionId } });
     return JSON.parse(auth?.creds);
-  } catch {
+  } catch (err) {
+    logger.error({ where: 'getAuthKey', sessionId, err: err?.message ?? String(err), stack: err?.stack });
     return null;
   }
 }
@@ -60,7 +74,8 @@ async function deleteAuthKey(sessionId: string): Promise<any> {
     const register = await keyExists(sessionId);
     if (!register) return;
     await prismaRepository.session.delete({ where: { sessionId: sessionId } });
-  } catch {
+  } catch (err) {
+    logger.error({ where: 'deleteAuthKey', sessionId, err: err?.message ?? String(err), stack: err?.stack });
     return;
   }
 }
@@ -73,8 +88,6 @@ async function fileExists(file: string): Promise<any> {
     return;
   }
 }
-
-const logger = new Logger('useMultiFileAuthStatePrisma');
 
 export default async function useMultiFileAuthStatePrisma(
   sessionId: string,
@@ -123,7 +136,8 @@ export default async function useMultiFileAuthStatePrisma(
 
       const parsedData = JSON.parse(rawData, BufferJSON.reviver);
       return parsedData;
-    } catch {
+    } catch (err) {
+      logger.error({ where: 'readData', sessionId, key, err: err?.message ?? String(err), stack: err?.stack });
       return null;
     }
   }
@@ -141,7 +155,8 @@ export default async function useMultiFileAuthStatePrisma(
       } else {
         await deleteAuthKey(sessionId);
       }
-    } catch {
+    } catch (err) {
+      logger.error({ where: 'removeData', sessionId, key, err: err?.message ?? String(err), stack: err?.stack });
       return;
     }
   }
