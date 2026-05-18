@@ -1,3 +1,11 @@
+## [unreleased — debugger]
+### Added
+- HMAC X-Hub-Signature-256 validation for inbound Meta webhooks (env `WA_BUSINESS_APP_SECRET`). Backward-compatible: skipped if env not set.
+- Default `WA_BUSINESS_VERSION` bumped from `v18.0` to `v25.0`.
+
+### Security
+- Inbound Meta webhooks can now be cryptographically validated, preventing spoofing.
+
 # 2.4.0 (2026-05-06)
 
 ### ⚠️ BREAKING CHANGE — License activation is now required

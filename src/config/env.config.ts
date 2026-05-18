@@ -195,6 +195,7 @@ export type WaBusiness = {
   URL: string;
   VERSION: string;
   LANGUAGE: string;
+  APP_SECRET: string | undefined;
 };
 
 export type EventsWebhook = {
@@ -740,8 +741,9 @@ export class ConfigService {
       WA_BUSINESS: {
         TOKEN_WEBHOOK: process.env.WA_BUSINESS_TOKEN_WEBHOOK || 'evolution',
         URL: process.env.WA_BUSINESS_URL || 'https://graph.facebook.com',
-        VERSION: process.env.WA_BUSINESS_VERSION || 'v18.0',
+        VERSION: process.env.WA_BUSINESS_VERSION || 'v25.0',
         LANGUAGE: process.env.WA_BUSINESS_LANGUAGE || 'en',
+        APP_SECRET: process.env.WA_BUSINESS_APP_SECRET || undefined,
       },
       LOG: {
         LEVEL:
