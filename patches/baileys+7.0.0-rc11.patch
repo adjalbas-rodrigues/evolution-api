@@ -1,13 +1,38 @@
 diff --git a/node_modules/baileys/lib/Signal/libsignal.js b/node_modules/baileys/lib/Signal/libsignal.js
-index beadd06..ec6010f 100644
+index beadd06..0228afd 100644
 --- a/node_modules/baileys/lib/Signal/libsignal.js
 +++ b/node_modules/baileys/lib/Signal/libsignal.js
-@@ -9,6 +9,29 @@ import { SenderKeyName } from './Group/sender-key-name.js';
+@@ -9,6 +9,55 @@ import { SenderKeyName } from './Group/sender-key-name.js';
  import { SenderKeyRecord } from './Group/sender-key-record.js';
  import { GroupCipher, GroupSessionBuilder, SenderKeyDistributionMessage } from './Group/index.js';
  import { LIDMappingStore } from './lid-mapping.js';
 +
 +let isSessionCipherYieldPatched = false;
++
++// Observability: counter of yielded decrypt attempts per rolling minute.
++// Logs a warn line whenever the rate crosses 100/min — early signal that
++// session staleness is degrading again even with the patch active. Pre-fix
++// production observed ~300/min from 'timed out waiting for message'; healthy
++// after patch should stay sub-50/min for blackCredPix-class instances.
++let yieldCount = 0;
++let yieldWindowStartMs = Date.now();
++const YIELD_RATE_THRESHOLD_PER_MIN = 100;
++
++function recordYield() {
++    yieldCount++;
++    const now = Date.now();
++    const elapsed = now - yieldWindowStartMs;
++    if (elapsed < 60_000) return;
++    const ratePerMin = (yieldCount * 60_000) / elapsed;
++    if (ratePerMin > YIELD_RATE_THRESHOLD_PER_MIN) {
++        // Plain console.warn — Evolution pino logger captures stderr globally.
++        // Stays single-line to keep JSON parsers happy.
++        // eslint-disable-next-line no-console
++        console.warn(`[libsignal-patch] HIGH yield rate detected — ${ratePerMin.toFixed(0)}/min over ${elapsed}ms window. Possible stale-session accumulation; consider reset or QR re-pair.`);
++    }
++    yieldCount = 0;
++    yieldWindowStartMs = now;
++}
 +
 +/**
 + * Workaround for libsignal-node event-loop starvation when decrypting with
@@ -24,6 +49,7 @@ index beadd06..ec6010f 100644
 +    const original = proto.doDecryptWhisperMessage;
 +    proto.doDecryptWhisperMessage = async function patchedDoDecryptWhisperMessage(...args) {
 +        await new Promise(resolve => setImmediate(resolve));
++        recordYield();
 +        return original.apply(this, args);
 +    };
 +    isSessionCipherYieldPatched = true;
@@ -32,7 +58,7 @@ index beadd06..ec6010f 100644
  /** Extract identity key from PreKeyWhisperMessage for identity change detection */
  function extractIdentityFromPkmsg(ciphertext) {
      try {
-@@ -32,6 +55,7 @@ function extractIdentityFromPkmsg(ciphertext) {
+@@ -32,6 +81,7 @@ function extractIdentityFromPkmsg(ciphertext) {
      }
  }
  export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
