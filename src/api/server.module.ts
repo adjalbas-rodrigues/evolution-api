@@ -40,6 +40,7 @@ import { S3Service } from './integrations/storage/s3/services/s3.service';
 import { ProviderFiles } from './provider/sessions';
 import { PrismaRepository } from './repository/repository.service';
 import { CacheService } from './services/cache.service';
+import { LidReaperService } from './services/lid-reaper.service';
 import { WAMonitoringService } from './services/monitor.service';
 import { ProxyService } from './services/proxy.service';
 import { SettingsService } from './services/settings.service';
@@ -137,5 +138,26 @@ export const n8nController = new N8nController(n8nService, prismaRepository, waM
 
 const evoaiService = new EvoaiService(waMonitor, prismaRepository, configService, openaiService);
 export const evoaiController = new EvoaiController(evoaiService, prismaRepository, waMonitor);
+
+// Layer 2 of LID→PN resolution fix — cron reaper safety net.
+// Opt-in: env LID_REAPER_ENABLED=true. Default OFF to not break other forks.
+export const lidReaper = new LidReaperService({
+  logger: new Logger('LidReaper') as any,
+  prismaRepository,
+  getInstanceContext: (instanceId: string) => {
+    const instance = Object.values(waMonitor.waInstances).find((w: any) => w?.instanceId === instanceId);
+    if (!instance) return null;
+    if (typeof instance.resolveLidToPN !== 'function' || typeof instance.emitMessageUpsert !== 'function') {
+      return null;
+    }
+    return {
+      resolveFn: (lid: string) => instance.resolveLidToPN(lid),
+      emitFn: (payload: any) => instance.emitMessageUpsert(payload),
+    };
+  },
+  batchSize: Number(process.env.LID_REAPER_BATCH_SIZE ?? 100),
+  lookbackSeconds: Number(process.env.LID_REAPER_LOOKBACK_SECONDS ?? 24 * 60 * 60),
+});
+lidReaper.start(process.env.LID_REAPER_ENABLED === 'true');
 
 logger.info('Module - ON');
