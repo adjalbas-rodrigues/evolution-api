@@ -64,6 +64,7 @@ import { PrismaRepository, Query } from '@api/repository/repository.service';
 import { chatbotController, waMonitor } from '@api/server.module';
 import { CacheService } from '@api/services/cache.service';
 import { ChannelStartupService } from '@api/services/channel.service';
+import { LidBufferService } from '@api/services/lid-buffer.service';
 import { Events, MessageSubtype, TypeMediaMessage, wa } from '@api/types/wa.types';
 import { CacheEngine } from '@cache/cacheengine';
 import {
@@ -244,6 +245,7 @@ function normalizeListType(listMessage?: proto.Message.IListMessage | null): voi
 
 export class BaileysStartupService extends ChannelStartupService {
   private messageProcessor = new BaileysMessageProcessor();
+  public readonly lidBuffer: LidBufferService;
 
   constructor(
     public readonly configService: ConfigService,
@@ -261,6 +263,12 @@ export class BaileysStartupService extends ChannelStartupService {
     });
 
     this.authStateProvider = new AuthStateProvider(this.providerFiles);
+
+    // Layer 1 of LID→PN resolution fix — buffer-and-wait when lidMapping
+    // is cold (e.g. right after QR re-pair). See lid-buffer.service.ts.
+    const ttlMs = Number(process.env.LID_BUFFER_TTL_MS ?? 30_000);
+    const maxPerLid = Number(process.env.LID_BUFFER_MAX_PER_LID ?? 100);
+    this.lidBuffer = new LidBufferService({ logger: this.logger as any, ttlMs, maxPerLid });
   }
 
   private authStateProvider: AuthStateProvider;
@@ -1661,16 +1669,48 @@ export class BaileysStartupService extends ChannelStartupService {
 
             messageRaw.key.addressingMode = 'pn';
           }
-          console.log(messageRaw);
 
-          this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
+          // Layer 1: buffer-and-wait for LID→PN resolution when remoteJidAlt
+          // is missing. Right after QR re-pair Baileys' lidMapping is empty
+          // and downstream consumers (ChatPersister) drop msgs without alt.
+          // The buffer holds the msg for up to LID_BUFFER_TTL_MS while
+          // attempting resolution; on hit the rewritten payload is emitted,
+          // on miss after TTL the msg is dropped (Layer 2 reaper picks it up).
+          if (messageRaw.key.remoteJid?.endsWith?.('@lid') && !messageRaw.key.remoteJidAlt) {
+            const lid: string = messageRaw.key.remoteJid as string;
+            const resolveFn = (j: string) => this.resolveLidToPN(j);
+            const emitFn = async (final: any) => {
+              this.sendDataWebhook(Events.MESSAGES_UPSERT, final);
+              await chatbotController.emit({
+                instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+                remoteJid: (final.key as any).remoteJid,
+                msg: final,
+                pushName: final.pushName,
+              });
+            };
+            const out = await this.lidBuffer.tryResolveOrBuffer({
+              instanceId: this.instanceId,
+              lid,
+              payload: messageRaw,
+              resolveFn,
+              emitFn,
+            });
+            if (out.action === 'buffered') {
+              // Skip downstream contact upsert too — wait until flush.
+              continue;
+            }
+            // 'emitted' path: emitFn already fired sendDataWebhook + chatbot.
+            // fall through to keep parity with existing contact upsert logic
+          } else {
+            this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
-          await chatbotController.emit({
-            instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-            remoteJid: (messageRaw.key as any).remoteJid,
-            msg: messageRaw,
-            pushName: messageRaw.pushName,
-          });
+            await chatbotController.emit({
+              instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+              remoteJid: (messageRaw.key as any).remoteJid,
+              msg: messageRaw,
+              pushName: messageRaw.pushName,
+            });
+          }
 
           const contact = await this.prismaRepository.contact.findFirst({
             where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
@@ -2139,6 +2179,17 @@ export class BaileysStartupService extends ChannelStartupService {
 
               // this.messageProcessor.processMessage(payload, settings);
               await this.messageHandle['messages.upsert'](payload, settings);
+
+              // Opportunistic flush of any pending LID buffers — incoming
+              // msgs frequently arrive paired with notification events that
+              // populate Baileys' lidMapping. We try-flush here so latency
+              // approaches "next msg in same conversation" rather than the
+              // full 30s TTL.
+              try {
+                await this.flushPendingLidBuffers();
+              } catch (err) {
+                this.logger.verbose(`[LidBuffer] opportunistic flush failed: ${(err as Error)?.message ?? err}`);
+              }
             }
 
             if (events['messages.update']) {
@@ -2262,6 +2313,76 @@ export class BaileysStartupService extends ChannelStartupService {
       (this.localSettings.syncFullHistory && msg?.syncType === 2) ||
       (!this.localSettings.syncFullHistory && msg?.syncType === 3)
     );
+  }
+
+  /**
+   * Emit a payload as a `messages.upsert` (downstream socket.io webhook +
+   * chatbot fanout). Used by the buffer flush callback and the reaper.
+   */
+  public async emitMessageUpsert(payload: any): Promise<void> {
+    this.sendDataWebhook(Events.MESSAGES_UPSERT, payload);
+    try {
+      await chatbotController.emit({
+        instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+        remoteJid: payload?.key?.remoteJid,
+        msg: payload,
+        pushName: payload?.pushName,
+      });
+    } catch (err) {
+      this.logger.warn(`[emitMessageUpsert] chatbot emit failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
+  /**
+   * Iterate over all currently-buffered (instance, LID) pairs in
+   * `this.lidBuffer` and attempt a flush. Best-effort — silently skips LIDs
+   * whose resolver still misses.
+   *
+   * Called opportunistically after every `messages.upsert` batch and also
+   * exposed for the cron reaper.
+   */
+  public async flushPendingLidBuffers(): Promise<void> {
+    const total = this.lidBuffer.totalPending();
+    if (total === 0) return;
+    await this.lidBuffer.opportunisticFlush({
+      resolveFn: (j: string) => this.resolveLidToPN(j),
+      emitFn: (p: any) => this.emitMessageUpsert(p),
+    });
+  }
+
+  /**
+   * Resolve a LID JID (e.g. '254876730831069@lid') to its PN equivalent
+   * (e.g. '5521999999999@s.whatsapp.net'). Used by `lidBuffer` (Layer 1)
+   * and `lid-reaper` (Layer 2).
+   *
+   * Strategy:
+   *   1. Try Baileys' in-memory `signalRepository.lidMapping.getPNForLID`.
+   *   2. Fallback to Postgres `IsOnWhatsapp` cache (keyed by lid='lid'
+   *      + jidOptions containing the lid).
+   *   3. Return null if both miss.
+   */
+  public async resolveLidToPN(lid: string): Promise<string | null> {
+    if (!lid || !lid.endsWith('@lid')) return null;
+
+    // 1. Baileys in-memory mapping (post-warmup hits land here)
+    try {
+      const pn = await this.client?.signalRepository?.lidMapping?.getPNForLID?.(lid);
+      if (pn && typeof pn === 'string') return pn;
+    } catch (err) {
+      this.logger.verbose(`[resolveLidToPN] in-memory miss for ${lid}: ${(err as Error)?.message ?? err}`);
+    }
+
+    // 2. PG fallback via IsOnWhatsapp cache (populated by earlier successful resolves)
+    try {
+      const row = await this.prismaRepository.isOnWhatsapp.findFirst({
+        where: { lid: 'lid', jidOptions: { contains: lid } },
+      });
+      if (row?.remoteJid && row.remoteJid !== lid) return row.remoteJid;
+    } catch (err) {
+      this.logger.verbose(`[resolveLidToPN] PG miss for ${lid}: ${(err as Error)?.message ?? err}`);
+    }
+
+    return null;
   }
 
   public async profilePicture(number: string) {
