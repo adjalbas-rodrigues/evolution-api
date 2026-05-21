@@ -1,13 +1,42 @@
-diff --git a/node_modules/baileys/lib/Utils/messages.js b/node_modules/baileys/lib/Utils/messages.js
-index 17b05b8..782efb4 100644
---- a/node_modules/baileys/lib/Utils/messages.js
-+++ b/node_modules/baileys/lib/Utils/messages.js
-@@ -132,7 +132,7 @@ export const prepareWAMessageMedia = async (message, options) => {
+diff --git a/node_modules/baileys/lib/Signal/libsignal.js b/node_modules/baileys/lib/Signal/libsignal.js
+index beadd06..ec6010f 100644
+--- a/node_modules/baileys/lib/Signal/libsignal.js
++++ b/node_modules/baileys/lib/Signal/libsignal.js
+@@ -9,6 +9,29 @@ import { SenderKeyName } from './Group/sender-key-name.js';
+ import { SenderKeyRecord } from './Group/sender-key-record.js';
+ import { GroupCipher, GroupSessionBuilder, SenderKeyDistributionMessage } from './Group/index.js';
+ import { LIDMappingStore } from './lid-mapping.js';
++
++let isSessionCipherYieldPatched = false;
++
++/**
++ * Workaround for libsignal-node event-loop starvation when decrypting with
++ * many stale sessions (upstream PR https://github.com/WhiskeySockets/Baileys/pull/2523,
++ * GH issue #2520). Yields to the event loop with `setImmediate` before each
++ * CPU-heavy `doDecryptWhisperMessage` attempt so keepalive pings + I/O can
++ * progress; otherwise event loop blocks 10-52s → 408 disconnect storm.
++ * Idempotent — guarded by module-level flag.
++ */
++function patchSessionCipherWithYield() {
++    if (isSessionCipherYieldPatched) return;
++    const proto = libsignal.SessionCipher && libsignal.SessionCipher.prototype;
++    if (!proto || typeof proto.doDecryptWhisperMessage !== 'function') return;
++    const original = proto.doDecryptWhisperMessage;
++    proto.doDecryptWhisperMessage = async function patchedDoDecryptWhisperMessage(...args) {
++        await new Promise(resolve => setImmediate(resolve));
++        return original.apply(this, args);
++    };
++    isSessionCipherYieldPatched = true;
++}
++
+ /** Extract identity key from PreKeyWhisperMessage for identity change detection */
+ function extractIdentityFromPkmsg(ciphertext) {
+     try {
+@@ -32,6 +55,7 @@ function extractIdentityFromPkmsg(ciphertext) {
      }
-     const requiresDurationComputation = mediaType === 'audio' && typeof uploadData.seconds === 'undefined';
-     const requiresThumbnailComputation = (mediaType === 'image' || mediaType === 'video') && typeof uploadData['jpegThumbnail'] === 'undefined';
--    const requiresWaveformProcessing = mediaType === 'audio' && uploadData.ptt === true;
-+    const requiresWaveformProcessing = mediaType === 'audio' && uploadData.ptt === true && typeof uploadData.waveform === 'undefined';
-     const requiresAudioBackground = options.backgroundColor && mediaType === 'audio' && uploadData.ptt === true;
-     const requiresOriginalForSomeProcessing = requiresDurationComputation || requiresThumbnailComputation;
-     const { mediaKey, encFilePath, originalFilePath, fileEncSha256, fileSha256, fileLength } = await encryptedStream(uploadData.media, options.mediaTypeOverride || mediaType, {
+ }
+ export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
++    patchSessionCipherWithYield();
+     const lidMapping = new LIDMappingStore(auth.keys, logger, pnToLIDFunc);
+     const storage = signalStorage(auth, lidMapping);
+     const parsedKeys = auth.keys;
