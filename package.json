@@ -9,7 +9,7 @@
     "start": "tsx ./src/main.ts",
     "start:prod": "node --network-family-autoselection-attempt-timeout=1000 dist/main",
     "dev:server": "tsx watch ./src/main.ts",
-    "test": "tsx watch ./test/all.test.ts",
+    "test": "tsx --test src/**/__tests__/*.test.ts",
     "lint": "eslint --fix --ext .ts src",
     "lint:check": "eslint --ext .ts src",
     "commit": "cz",
