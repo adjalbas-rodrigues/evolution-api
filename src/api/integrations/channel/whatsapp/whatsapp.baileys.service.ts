@@ -1728,9 +1728,19 @@ export class BaileysStartupService extends ChannelStartupService {
             });
           }
 
+          const _ctT0 = Date.now();
           const contact = await this.prismaRepository.contact.findFirst({
             where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
           });
+          console.log(`[DIAG-MU] CONTACT-FIND took=${Date.now()-_ctT0}ms jid=${received.key.remoteJid}`);
+
+          const _ppT0 = Date.now();
+          console.log(`[DIAG-MU] PROFILE-PIC-START jid=${received.key.remoteJid}`);
+          const _ppResult = await this.profilePicture(received.key.remoteJid).catch((e: any) => {
+            console.error(`[DIAG-MU] PROFILE-PIC-ERR took=${Date.now()-_ppT0}ms jid=${received.key.remoteJid} err=${e?.message}`);
+            return { profilePictureUrl: undefined };
+          });
+          console.log(`[DIAG-MU] PROFILE-PIC-END took=${Date.now()-_ppT0}ms jid=${received.key.remoteJid} url=${_ppResult.profilePictureUrl ? 'yes' : 'no'}`);
 
           const contactRaw: {
             remoteJid: string;
@@ -1740,7 +1750,7 @@ export class BaileysStartupService extends ChannelStartupService {
           } = {
             remoteJid: received.key.remoteJid,
             pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+            profilePicUrl: _ppResult.profilePictureUrl,
             instanceId: this.instanceId,
           };
 
