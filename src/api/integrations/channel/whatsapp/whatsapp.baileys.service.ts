@@ -1267,8 +1267,11 @@ export class BaileysStartupService extends ChannelStartupService {
       { messages, type, requestId }: { messages: WAMessage[]; type: MessageUpsertType; requestId?: string },
       settings: any,
     ) => {
+      console.log(`[DIAG-MU] ENTRY type=${type} count=${messages?.length ?? 0} requestId=${requestId ?? 'none'}`);
       try {
         for (const received of messages) {
+          const diagKey = `${received?.key?.id ?? 'no-id'}|jid=${received?.key?.remoteJid ?? 'no-jid'}|fromMe=${received?.key?.fromMe}|hasMsg=${!!received?.message}|stubType=${received?.messageStubType ?? 'none'}`;
+          console.log(`[DIAG-MU] LOOP ${diagKey}`);
           if (
             received?.messageStubParameters?.some?.((param) =>
               [
@@ -1283,6 +1286,7 @@ export class BaileysStartupService extends ChannelStartupService {
               ].some((err) => param?.includes?.(err)),
             )
           ) {
+            console.log(`[DIAG-MU] SKIP-stub ${diagKey}`);
             this.logger.warn(`Message ignored with messageStubParameters: ${JSON.stringify(received, null, 2)}`);
             continue;
           }
@@ -1348,6 +1352,7 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if ((type !== 'notify' && type !== 'append') || editedMessage || !received?.message) {
+            console.log(`[DIAG-MU] SKIP-type type=${type} edited=${!!editedMessage} noMsg=${!received?.message} ${diagKey}`);
             continue;
           }
 
@@ -1356,8 +1361,10 @@ export class BaileysStartupService extends ChannelStartupService {
           }
 
           if (settings?.groupsIgnore && received.key.remoteJid.includes('@g.us')) {
+            console.log(`[DIAG-MU] SKIP-groupsIgnore ${diagKey}`);
             continue;
           }
+          console.log(`[DIAG-MU] PASSED-filters ${diagKey}`);
 
           const existingChat = await this.prismaRepository.chat.findFirst({
             where: { instanceId: this.instanceId, remoteJid: received.key.remoteJid },
@@ -1537,10 +1544,19 @@ export class BaileysStartupService extends ChannelStartupService {
             }
           }
 
-          if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
+          const saveNewMsgFlag = this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE;
+          console.log(`[DIAG-MU] PRE-PG-INSERT save=${saveNewMsgFlag} ${diagKey}`);
+          if (saveNewMsgFlag) {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
             const { pollUpdates, ...messageData } = messageRaw as any;
-            const msg = await this.prismaRepository.message.create({ data: messageData });
+            let msg;
+            try {
+              msg = await this.prismaRepository.message.create({ data: messageData });
+              console.log(`[DIAG-MU] PG-INSERT-OK id=${msg.id} ${diagKey}`);
+            } catch (e: any) {
+              console.error(`[DIAG-MU] PG-INSERT-ERR ${diagKey} code=${e?.code} meta=${JSON.stringify(e?.meta ?? {})} msg=${e?.message}`);
+              throw e;
+            }
 
             const { remoteJid } = received.key;
             const timestamp = msg.messageTimestamp;
@@ -1775,7 +1791,8 @@ export class BaileysStartupService extends ChannelStartupService {
               create: contactRaw,
             });
         }
-      } catch (error) {
+      } catch (error: any) {
+        console.error(`[DIAG-MU] OUTER-CATCH msg=${error?.message} stack=${error?.stack?.split('\n').slice(0,4).join(' | ')}`);
         this.logger.error(error);
       }
     },
