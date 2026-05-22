@@ -1728,25 +1728,36 @@ export class BaileysStartupService extends ChannelStartupService {
             });
           }
 
-          const _ctT0 = Date.now();
           const contact = await this.prismaRepository.contact.findFirst({
             where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
           });
-          console.log(`[DIAG-MU] CONTACT-FIND took=${Date.now()-_ctT0}ms jid=${received.key.remoteJid}`);
 
           // FIX 2026-05-22: profilePicture() WhatsApp query default timeout 60s.
-          // When WA doesn't respond (peer offline, throttle), every msg blocked 60s.
-          // Profile pic is OPTIONAL on contact insert — wrap in 5s race with undefined fallback.
-          const _ppT0 = Date.now();
-          const _ppResult = await Promise.race([
-            this.profilePicture(received.key.remoteJid).catch(() => ({ profilePictureUrl: undefined })),
-            new Promise<{ profilePictureUrl: undefined }>((resolve) =>
-              setTimeout(() => resolve({ profilePictureUrl: undefined }), 5000),
-            ),
-          ]);
-          const _ppTook = Date.now() - _ppT0;
-          if (_ppTook > 2000) {
-            console.log(`[ProfilePic] slow took=${_ppTook}ms jid=${received.key.remoteJid} url=${_ppResult.profilePictureUrl ? 'yes' : 'no'}`);
+          // Was blocking EVERY msg by 60s, causing 1-msg-per-minute cadence.
+          // New approach: cache-first (Contact.profilePicUrl already stored), fire-
+          // and-forget refresh on miss. Hot path zero-blocked.
+          const cachedPicUrl = (contact as any)?.profilePicUrl as string | undefined;
+          if (!cachedPicUrl && received.key.remoteJid !== 'status@broadcast') {
+            // Fire-and-forget: refresh cache async, never blocks msg pipeline.
+            const _jid = received.key.remoteJid;
+            const _instanceId = this.instanceId;
+            this.profilePicture(_jid)
+              .then(async (pic) => {
+                if (pic?.profilePictureUrl) {
+                  try {
+                    await this.prismaRepository.contact.upsert({
+                      where: { remoteJid_instanceId: { remoteJid: _jid, instanceId: _instanceId } },
+                      update: { profilePicUrl: pic.profilePictureUrl },
+                      create: { remoteJid: _jid, instanceId: _instanceId, profilePicUrl: pic.profilePictureUrl, pushName: '' },
+                    });
+                  } catch {
+                    /* swallow — best-effort cache refresh */
+                  }
+                }
+              })
+              .catch(() => {
+                /* swallow — WA query may timeout for unreachable peers */
+              });
           }
 
           const contactRaw: {
@@ -1757,7 +1768,7 @@ export class BaileysStartupService extends ChannelStartupService {
           } = {
             remoteJid: received.key.remoteJid,
             pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: _ppResult.profilePictureUrl,
+            profilePicUrl: cachedPicUrl,
             instanceId: this.instanceId,
           };
 
