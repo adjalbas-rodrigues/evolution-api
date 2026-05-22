@@ -229,3 +229,181 @@ describe('Baileys migrateSession — issue #2548 reproduction', () => {
     assert.equal(result.total, 0);
   });
 });
+
+/**
+ * V2 contract tests — issue #2548 follow-up.
+ *
+ * V1 patch (commit c78e977e) added a fallback to `fromJid`'s decoded device
+ * when `device-list` storage is empty. That works when the peer's active
+ * device is :0 (the default), but fails for multi-device peers (Linked
+ * Devices / Desktop) whose active session lives at `<user>.<N>` for N != 0
+ * — the fromJid in many callers has no device suffix, so the fallback
+ * forces `userDevices = ['0']` and the real session at `.N` is never
+ * discovered.
+ *
+ * V2 widens the signature: `migrateSession(fromJid, toJid, hintDevice?)`.
+ * Callers that have device context (stanza receipts, USync results, own
+ * device) can pass an explicit hint. Backwards-compatible: callers that
+ * still call with two args fall through V1 behavior.
+ */
+describe('Baileys migrateSession V2 — device-aware via hintDevice (#2548 follow-up)', () => {
+  it('TS-2.1: caller passes hintDevice → migrates session at hint device key', async () => {
+    // Production scenario: peer's active session is under device :10 (linked desktop),
+    // device-list cache empty (no outbound has triggered USync yet), fromJid is bare PN
+    // (no :10 suffix because stanza.attrs.from didn't include it). V1 patch defaults to
+    // '0' which is wrong; V2 uses the hint to look up the right slot.
+    const HINT_DEVICE = 10;
+    const HINT_SESSION_KEY = `${PN_USER}.${HINT_DEVICE}`;
+    const HINT_LID_SESSION_KEY = `${LID_USER}_1.${HINT_DEVICE}`;
+    const { auth, store, pnToLIDFunc } = makeAuth({
+      sessions: { [HINT_SESSION_KEY]: makeRealSessionBlob() },
+      deviceList: {},
+      lidForPn: { [PN_JID]: LID_JID },
+    });
+    const repo = makeLibSignalRepository(auth, noopLogger, pnToLIDFunc);
+    await repo.lidMapping.storeLIDPNMappings([{ lid: LID_JID, pn: PN_JID }]);
+
+    const result = await repo.migrateSession(PN_JID, LID_JID, HINT_DEVICE);
+
+    assert.equal(
+      result.migrated,
+      1,
+      `V2 hint must rescue device-${HINT_DEVICE} session. Storage state: ` +
+        JSON.stringify(Object.keys(store.session)),
+    );
+    assert.ok(
+      store.session[HINT_LID_SESSION_KEY],
+      `V2: LID session key "${HINT_LID_SESSION_KEY}" must be populated. ` +
+        `Current: ${JSON.stringify(Object.keys(store.session))}`,
+    );
+    assert.equal(
+      store.session[HINT_SESSION_KEY],
+      undefined,
+      'V2: PN session at hint device removed after migration (move semantics)',
+    );
+  });
+
+  it('TS-2.2: regression — undefined hintDevice + bare fromJid still works (V1 path)', async () => {
+    // Backwards-compat: callers that don't have device context call with 2 args.
+    // Should keep V1 behavior — fallback to fromJid's decoded device (default '0').
+    const { auth, store, pnToLIDFunc } = makeAuth({
+      sessions: { [PN_SESSION_KEY]: makeRealSessionBlob() },
+      deviceList: {},
+      lidForPn: { [PN_JID]: LID_JID },
+    });
+    const repo = makeLibSignalRepository(auth, noopLogger, pnToLIDFunc);
+    await repo.lidMapping.storeLIDPNMappings([{ lid: LID_JID, pn: PN_JID }]);
+
+    // Explicitly pass undefined to assert the 3-arg signature is optional.
+    const result = await repo.migrateSession(PN_JID, LID_JID, undefined);
+
+    assert.equal(result.migrated, 1, 'V1 regression: undefined hint → fromJid device fallback');
+    assert.ok(store.session[LID_SESSION_KEY], 'V1 regression: LID key populated via fromJid device');
+  });
+
+  it('TS-2.3: hintDevice has priority over fromJid-decoded device', async () => {
+    // fromJid suggests device :5 (from stanza.attrs.from suffix), but caller
+    // explicitly passes hintDevice=10 (e.g. extracted from <enc> child or
+    // receipt). Hint must win and be included in the device list.
+    const FROM_JID_WITH_DEVICE = `${PN_USER}:5@s.whatsapp.net`;
+    const HINT_DEVICE = 10;
+    const HINT_SESSION_KEY = `${PN_USER}.${HINT_DEVICE}`;
+    const HINT_LID_SESSION_KEY = `${LID_USER}_1.${HINT_DEVICE}`;
+    const { auth, store, pnToLIDFunc } = makeAuth({
+      // Only the hint-device session exists; the fromJid-decoded device has no session.
+      sessions: { [HINT_SESSION_KEY]: makeRealSessionBlob() },
+      deviceList: {},
+      lidForPn: { [PN_JID]: LID_JID, [FROM_JID_WITH_DEVICE]: LID_JID },
+    });
+    const repo = makeLibSignalRepository(auth, noopLogger, pnToLIDFunc);
+    await repo.lidMapping.storeLIDPNMappings([
+      { lid: LID_JID, pn: PN_JID },
+      { lid: LID_JID, pn: FROM_JID_WITH_DEVICE },
+    ]);
+
+    const result = await repo.migrateSession(FROM_JID_WITH_DEVICE, LID_JID, HINT_DEVICE);
+
+    assert.equal(
+      result.migrated,
+      1,
+      `V2: hint device ${HINT_DEVICE} must rescue session even when fromJid suggests :5`,
+    );
+    assert.ok(
+      store.session[HINT_LID_SESSION_KEY],
+      `V2: hint device LID session "${HINT_LID_SESSION_KEY}" must exist`,
+    );
+  });
+
+  it('TS-2.4: device-list populated → hintDevice merged into list (no duplicate)', async () => {
+    // When device-list IS populated (post-outbound, USync has run), the hint
+    // device should be added to the list if not already present. Pre-existing
+    // sessions still migrate; hint device's session also migrates.
+    const HINT_DEVICE = 10;
+    const HINT_SESSION_KEY = `${PN_USER}.${HINT_DEVICE}`;
+    const HINT_LID_SESSION_KEY = `${LID_USER}_1.${HINT_DEVICE}`;
+    const DEVICE_5_SESSION_KEY = `${PN_USER}.5`;
+    const DEVICE_5_LID_SESSION_KEY = `${LID_USER}_1.5`;
+    const { auth, store, pnToLIDFunc } = makeAuth({
+      sessions: {
+        [PN_SESSION_KEY]: makeRealSessionBlob(),       // device 0
+        [DEVICE_5_SESSION_KEY]: makeRealSessionBlob(), // device 5
+        [HINT_SESSION_KEY]: makeRealSessionBlob(),     // device 10 (hint)
+      },
+      deviceList: { [PN_USER]: ['0', '5'] }, // hint device NOT in list
+      lidForPn: { [PN_JID]: LID_JID },
+    });
+    const repo = makeLibSignalRepository(auth, noopLogger, pnToLIDFunc);
+    await repo.lidMapping.storeLIDPNMappings([{ lid: LID_JID, pn: PN_JID }]);
+
+    const result = await repo.migrateSession(PN_JID, LID_JID, HINT_DEVICE);
+
+    assert.equal(result.migrated, 3, 'V2: all 3 devices migrate (0, 5, 10) — hint merged');
+    assert.ok(store.session[LID_SESSION_KEY], 'device 0 LID session present');
+    assert.ok(store.session[DEVICE_5_LID_SESSION_KEY], 'device 5 LID session present');
+    assert.ok(store.session[HINT_LID_SESSION_KEY], 'device 10 (hint) LID session present');
+  });
+
+  it('TS-2.5: device-list populated + hintDevice already in list → no duplicate, still migrates', async () => {
+    // Idempotency: passing a hint that's already in the cached list must not
+    // cause duplicates or extra lookups; result must be deterministic.
+    const HINT_DEVICE = 5;
+    const DEVICE_5_SESSION_KEY = `${PN_USER}.${HINT_DEVICE}`;
+    const DEVICE_5_LID_SESSION_KEY = `${LID_USER}_1.${HINT_DEVICE}`;
+    const { auth, store, pnToLIDFunc } = makeAuth({
+      sessions: {
+        [PN_SESSION_KEY]: makeRealSessionBlob(),
+        [DEVICE_5_SESSION_KEY]: makeRealSessionBlob(),
+      },
+      deviceList: { [PN_USER]: ['0', '5'] },
+      lidForPn: { [PN_JID]: LID_JID },
+    });
+    const repo = makeLibSignalRepository(auth, noopLogger, pnToLIDFunc);
+    await repo.lidMapping.storeLIDPNMappings([{ lid: LID_JID, pn: PN_JID }]);
+
+    const result = await repo.migrateSession(PN_JID, LID_JID, HINT_DEVICE);
+
+    assert.equal(result.migrated, 2, 'V2: both devices migrate, no duplicate from hint');
+    assert.ok(store.session[LID_SESSION_KEY], 'device 0 migrated');
+    assert.ok(store.session[DEVICE_5_LID_SESSION_KEY], 'device 5 migrated');
+  });
+
+  it('TS-2.6: hintDevice as string accepted (caller-friendly typing)', async () => {
+    // Some callers extract device from JID via jidDecode (returns number) but
+    // others may already have it stringified. Both should work.
+    const HINT_DEVICE = '10';
+    const HINT_SESSION_KEY = `${PN_USER}.10`;
+    const HINT_LID_SESSION_KEY = `${LID_USER}_1.10`;
+    const { auth, store, pnToLIDFunc } = makeAuth({
+      sessions: { [HINT_SESSION_KEY]: makeRealSessionBlob() },
+      deviceList: {},
+      lidForPn: { [PN_JID]: LID_JID },
+    });
+    const repo = makeLibSignalRepository(auth, noopLogger, pnToLIDFunc);
+    await repo.lidMapping.storeLIDPNMappings([{ lid: LID_JID, pn: PN_JID }]);
+
+    const result = await repo.migrateSession(PN_JID, LID_JID, HINT_DEVICE);
+
+    assert.equal(result.migrated, 1, 'V2: string hint device accepted');
+    assert.ok(store.session[HINT_LID_SESSION_KEY], 'V2: LID session under string hint device');
+  });
+});
