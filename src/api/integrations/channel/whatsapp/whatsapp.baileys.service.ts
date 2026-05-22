@@ -2153,11 +2153,19 @@ export class BaileysStartupService extends ChannelStartupService {
 
   private eventHandler() {
     this.client.ev.process(async (events) => {
+      const _diagEvKeys = Object.keys(events ?? {}).join(',');
+      const _diagMsgCount = events['messages.upsert']?.messages?.length ?? 0;
+      console.log(`[DIAG-EV] PROCESS-ENTER instance=${this.instance.name} events=[${_diagEvKeys}] msgs=${_diagMsgCount} queueDepth=${this.eventProcessingQueue ? 'yes' : 'no'}`);
+      const _evT0 = Date.now();
       this.eventProcessingQueue = this.eventProcessingQueue.then(async () => {
+        const _qT0 = Date.now();
+        console.log(`[DIAG-EV] QUEUE-START instance=${this.instance.name} waitedInQueue=${_qT0-_evT0}ms events=[${_diagEvKeys}] msgs=${_diagMsgCount}`);
         try {
           if (!this.endSession) {
             const database = this.configService.get<Database>('DATABASE');
+            const _setT0 = Date.now();
             const settings = await this.findSettings();
+            console.log(`[DIAG-EV] FIND-SETTINGS took=${Date.now()-_setT0}ms instance=${this.instance.name}`);
 
             if (events.call) {
               const call = events.call[0];
@@ -2194,17 +2202,23 @@ export class BaileysStartupService extends ChannelStartupService {
             if (events['messages.upsert']) {
               const payload = events['messages.upsert'];
 
+              console.log(`[DIAG-EV] PRE-MU-HANDLER instance=${this.instance.name} msgs=${payload.messages?.length ?? 0} type=${payload.type}`);
+              const _muT0 = Date.now();
               // this.messageProcessor.processMessage(payload, settings);
               await this.messageHandle['messages.upsert'](payload, settings);
+              console.log(`[DIAG-EV] POST-MU-HANDLER instance=${this.instance.name} took=${Date.now()-_muT0}ms`);
 
               // Opportunistic flush of any pending LID buffers — incoming
               // msgs frequently arrive paired with notification events that
               // populate Baileys' lidMapping. We try-flush here so latency
               // approaches "next msg in same conversation" rather than the
               // full 30s TTL.
+              const _lidT0 = Date.now();
               try {
                 await this.flushPendingLidBuffers();
+                console.log(`[DIAG-EV] LID-FLUSH took=${Date.now()-_lidT0}ms instance=${this.instance.name}`);
               } catch (err) {
+                console.log(`[DIAG-EV] LID-FLUSH-ERR took=${Date.now()-_lidT0}ms err=${(err as Error)?.message}`);
                 this.logger.verbose(`[LidBuffer] opportunistic flush failed: ${(err as Error)?.message ?? err}`);
               }
             }
@@ -2295,7 +2309,9 @@ export class BaileysStartupService extends ChannelStartupService {
               return;
             }
           }
+          console.log(`[DIAG-EV] QUEUE-END instance=${this.instance.name} totalTook=${Date.now()-_qT0}ms events=[${_diagEvKeys}]`);
         } catch (error) {
+          console.error(`[DIAG-EV] QUEUE-CATCH instance=${this.instance.name} took=${Date.now()-_qT0}ms err=${(error as Error)?.message} stack=${(error as Error)?.stack?.split('\n').slice(0,3).join(' | ')}`);
           this.logger.error(error);
         }
       });

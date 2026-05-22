@@ -139,3 +139,31 @@ index f2003ac..a87a398 100644
              logger.error({ error, node: binaryNodeToString(node) }, 'error in handling message');
              if (!acked) {
                  await sendMessageAck(node, NACK_REASONS.UnhandledError).catch(ackErr => logger.error({ ackErr }, 'failed to ack message after error'));
+diff --git a/node_modules/baileys/lib/Utils/event-buffer.js b/node_modules/baileys/lib/Utils/event-buffer.js
+index 9b32e6f..a67cc83 100644
+--- a/node_modules/baileys/lib/Utils/event-buffer.js
++++ b/node_modules/baileys/lib/Utils/event-buffer.js
+@@ -40,6 +40,7 @@ export const makeEventBuffer = (logger) => {
+     });
+     function buffer() {
+         if (!isBuffering) {
++            console.log(`[DIAG-BUF] BUFFER-ACTIVATE`);
+             logger.debug('Event buffer activated');
+             isBuffering = true;
+             bufferCount = 0;
+@@ -48,6 +49,7 @@ export const makeEventBuffer = (logger) => {
+             }
+             bufferTimeout = setTimeout(() => {
+                 if (isBuffering) {
++                    console.log(`[DIAG-BUF] BUFFER-AUTO-FLUSH-TIMEOUT count=${bufferCount}`);
+                     logger.warn('Buffer timeout reached, auto-flushing');
+                     flush();
+                 }
+@@ -60,6 +62,7 @@ export const makeEventBuffer = (logger) => {
+         if (!isBuffering) {
+             return false;
+         }
++        console.log(`[DIAG-BUF] FLUSH-CALLED count=${bufferCount} events=${Object.keys(data || {}).filter(k => data[k] && Object.keys(data[k]).length > 0).join(',')}`);
+         logger.debug({ bufferCount }, 'Flushing event buffer');
+         isBuffering = false;
+         bufferCount = 0;
