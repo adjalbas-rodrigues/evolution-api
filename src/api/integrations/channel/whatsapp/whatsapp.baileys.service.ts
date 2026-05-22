@@ -1734,13 +1734,20 @@ export class BaileysStartupService extends ChannelStartupService {
           });
           console.log(`[DIAG-MU] CONTACT-FIND took=${Date.now()-_ctT0}ms jid=${received.key.remoteJid}`);
 
+          // FIX 2026-05-22: profilePicture() WhatsApp query default timeout 60s.
+          // When WA doesn't respond (peer offline, throttle), every msg blocked 60s.
+          // Profile pic is OPTIONAL on contact insert — wrap in 5s race with undefined fallback.
           const _ppT0 = Date.now();
-          console.log(`[DIAG-MU] PROFILE-PIC-START jid=${received.key.remoteJid}`);
-          const _ppResult = await this.profilePicture(received.key.remoteJid).catch((e: any) => {
-            console.error(`[DIAG-MU] PROFILE-PIC-ERR took=${Date.now()-_ppT0}ms jid=${received.key.remoteJid} err=${e?.message}`);
-            return { profilePictureUrl: undefined };
-          });
-          console.log(`[DIAG-MU] PROFILE-PIC-END took=${Date.now()-_ppT0}ms jid=${received.key.remoteJid} url=${_ppResult.profilePictureUrl ? 'yes' : 'no'}`);
+          const _ppResult = await Promise.race([
+            this.profilePicture(received.key.remoteJid).catch(() => ({ profilePictureUrl: undefined })),
+            new Promise<{ profilePictureUrl: undefined }>((resolve) =>
+              setTimeout(() => resolve({ profilePictureUrl: undefined }), 5000),
+            ),
+          ]);
+          const _ppTook = Date.now() - _ppT0;
+          if (_ppTook > 2000) {
+            console.log(`[ProfilePic] slow took=${_ppTook}ms jid=${received.key.remoteJid} url=${_ppResult.profilePictureUrl ? 'yes' : 'no'}`);
+          }
 
           const contactRaw: {
             remoteJid: string;
