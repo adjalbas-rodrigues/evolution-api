@@ -167,13 +167,11 @@ describe('Baileys migrateSession — issue #2548 reproduction', () => {
 
     const result = await repo.migrateSession(PN_JID, LID_JID);
 
-    // The smoking gun for the unpatched / pre-fix world: session still under PN key.
-    assert.ok(store.session[PN_SESSION_KEY], 'PN session must still be in storage');
-
-    // Post-fix, BOTH assertions should hold:
-    //  • migrate must succeed (migrated >= 1) — the fix recovers the session.
+    // Post-fix contract — all three must hold:
+    //  • migrate must succeed (migrated == 1) — the fix recovers the PN session.
     //  • LID key must be populated — downstream decryptMessage(LID) will then load it.
-    // Without the fix, both fail (the bug state) — this is the RED proof.
+    //  • PN key must be cleared — the migration is a move, not a copy.
+    // Without the fix (pre-patch or e450f4d1's force-null), all three fail.
     assert.equal(
       result.migrated,
       1,
@@ -185,6 +183,11 @@ describe('Baileys migrateSession — issue #2548 reproduction', () => {
       store.session[LID_SESSION_KEY],
       `BUG (#2548): LID session key "${LID_SESSION_KEY}" must be populated after migrate. ` +
         `Current session storage: ${JSON.stringify(Object.keys(store.session))}`,
+    );
+    assert.equal(
+      store.session[PN_SESSION_KEY],
+      undefined,
+      'fix: PN session removed after migration (move, not copy)',
     );
   });
 
