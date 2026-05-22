@@ -1,5 +1,5 @@
 diff --git a/node_modules/baileys/lib/Signal/libsignal.js b/node_modules/baileys/lib/Signal/libsignal.js
-index beadd06..3051148 100644
+index beadd06..44c98b9 100644
 --- a/node_modules/baileys/lib/Signal/libsignal.js
 +++ b/node_modules/baileys/lib/Signal/libsignal.js
 @@ -9,6 +9,55 @@ import { SenderKeyName } from './Group/sender-key-name.js';
@@ -66,17 +66,41 @@ index beadd06..3051148 100644
      const lidMapping = new LIDMappingStore(auth.keys, logger, pnToLIDFunc);
      const storage = signalStorage(auth, lidMapping);
      const parsedKeys = auth.keys;
-@@ -211,8 +261,11 @@ export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
+@@ -211,14 +261,31 @@ export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
              }
              const { user } = jidDecode(fromJid);
              logger.debug({ fromJid }, 'bulk device migration - loading all user devices');
 -            // Get user's device list from storage
 -            const { [user]: userDevices } = await parsedKeys.get('device-list', [user]);
-+            // Patch (issue #2548): session storage uses 'user@s.whatsapp.net:device:XXXXX'
-+            // but migrateSession's lookup expects 'user.device' — mismatch makes every
-+            // session miss and msgs go to retry cache infinitely, blocking messages.upsert.
-+            // Forcing null restores pre-rc10 behavior (early-return).
-+            const { [user]: userDevices } = { [user]: null };
-             if (!userDevices) {
-                 return { migrated: 0, skipped: 0, total: 0 };
+-            if (!userDevices) {
+-                return { migrated: 0, skipped: 0, total: 0 };
+-            }
++            // Patch (issue #2548 — replaces commit e450f4d1's force-null workaround):
++            //
++            // The fork's Redis-backed auth state populates `device-list` only when
++            // `getUSyncDevices` runs (outbound paths in messages-send.js). For an
++            // instance whose FIRST event with a contact is an INBOUND message (very
++            // common for support/bot inboxes like blackCredPix), `device-list` for
++            // the sender is empty — the original rc.10+ code then returns
++            // `{migrated:0}` without inspecting whether a session is already stored
++            // under the PN signal address. Downstream `decryptMessage({jid: LID})`
++            // misses, msg goes to retry cache, and `messages.upsert` never fires.
++            //
++            // Fix: when `device-list` is empty, fall back to a single-device list
++            // derived from `fromJid` itself (almost always device 0). The migration
++            // loop below already guards against missing sessions (`if (sessionData)`),
++            // so a bogus fallback device just becomes a no-op — but a real session
++            // under `<user>.0` will be discovered and copied to the LID address.
+             const { device: fromDevice } = jidDecode(fromJid);
+             const fromDeviceStr = fromDevice?.toString() || '0';
+-            if (!userDevices.includes(fromDeviceStr)) {
++            let { [user]: userDevices } = await parsedKeys.get('device-list', [user]);
++            if (!userDevices || userDevices.length === 0) {
++                // Empty device-list → fallback to fromJid's device. Logged so we can
++                // observe how often the fallback path activates in production.
++                logger.debug({ fromJid, fromDeviceStr }, 'device-list empty — falling back to fromJid device for migration (#2548)');
++                userDevices = [fromDeviceStr];
++            } else if (!userDevices.includes(fromDeviceStr)) {
+                 userDevices.push(fromDeviceStr);
              }
+             // Filter out cached devices before database fetch
