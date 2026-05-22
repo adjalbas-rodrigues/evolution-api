@@ -1,5 +1,5 @@
 diff --git a/node_modules/baileys/lib/Signal/libsignal.js b/node_modules/baileys/lib/Signal/libsignal.js
-index beadd06..44c98b9 100644
+index beadd06..1f5ab4d 100644
 --- a/node_modules/baileys/lib/Signal/libsignal.js
 +++ b/node_modules/baileys/lib/Signal/libsignal.js
 @@ -9,6 +9,55 @@ import { SenderKeyName } from './Group/sender-key-name.js';
@@ -66,41 +66,164 @@ index beadd06..44c98b9 100644
      const lidMapping = new LIDMappingStore(auth.keys, logger, pnToLIDFunc);
      const storage = signalStorage(auth, lidMapping);
      const parsedKeys = auth.keys;
-@@ -211,14 +261,31 @@ export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
+@@ -201,7 +251,7 @@ export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
+             migratedSessionCache.clear();
+             lidMapping.close();
+         },
+-        async migrateSession(fromJid, toJid) {
++        async migrateSession(fromJid, toJid, hintDevice) {
+             // TODO: use usync to handle this entire mess
+             if (!fromJid || (!isLidUser(toJid) && !isHostedLidUser(toJid)))
+                 return { migrated: 0, skipped: 0, total: 0 };
+@@ -210,16 +260,57 @@ export function makeLibSignalRepository(auth, logger, pnToLIDFunc) {
+                 return { migrated: 0, skipped: 0, total: 1 };
              }
              const { user } = jidDecode(fromJid);
-             logger.debug({ fromJid }, 'bulk device migration - loading all user devices');
+-            logger.debug({ fromJid }, 'bulk device migration - loading all user devices');
 -            // Get user's device list from storage
 -            const { [user]: userDevices } = await parsedKeys.get('device-list', [user]);
 -            if (!userDevices) {
 -                return { migrated: 0, skipped: 0, total: 0 };
 -            }
-+            // Patch (issue #2548 — replaces commit e450f4d1's force-null workaround):
++            logger.debug({ fromJid, hintDevice }, 'bulk device migration - loading all user devices');
++            // Patch (issue #2548 — V2 device-aware fallback, supersedes V1 c78e977e):
 +            //
 +            // The fork's Redis-backed auth state populates `device-list` only when
 +            // `getUSyncDevices` runs (outbound paths in messages-send.js). For an
 +            // instance whose FIRST event with a contact is an INBOUND message (very
 +            // common for support/bot inboxes like blackCredPix), `device-list` for
-+            // the sender is empty — the original rc.10+ code then returns
-+            // `{migrated:0}` without inspecting whether a session is already stored
-+            // under the PN signal address. Downstream `decryptMessage({jid: LID})`
-+            // misses, msg goes to retry cache, and `messages.upsert` never fires.
++            // the sender is empty.
 +            //
-+            // Fix: when `device-list` is empty, fall back to a single-device list
-+            // derived from `fromJid` itself (almost always device 0). The migration
-+            // loop below already guards against missing sessions (`if (sessionData)`),
-+            // so a bogus fallback device just becomes a no-op — but a real session
-+            // under `<user>.0` will be discovered and copied to the LID address.
++            // V1 fallback used `jidDecode(fromJid).device || '0'`. That works when
++            // the peer's active session lives at `<user>.0` — but many callers pass
++            // a bare PN JID (no `:N` suffix because `stanza.attrs.from` doesn't
++            // carry peer device on 1:1 PN messages), so V1 always falls back to '0'.
++            // When the real session is at `<user>.N` (N > 0, e.g. linked desktop),
++            // V1 never discovers it and migrated stays 0.
++            //
++            // V2 accepts an explicit `hintDevice` from the caller (number or string).
++            // Callers with device context (USync result, receipt stanza, own auth
++            // state) can pass it; legacy 2-arg callers keep V1 behavior.
++            //
++            // Priority for fallback device when device-list is empty:
++            //   1. hintDevice  (caller-supplied, highest signal)
++            //   2. jidDecode(fromJid).device  (V1 path)
++            //   3. '0'  (legacy default — when fromJid is bare and no hint)
++            //
++            // When device-list IS populated, both fromJid-decoded device AND
++            // hintDevice are merged in if not already present (covers edges where
++            // USync populated some devices but a newer linked device isn't cached).
++            //
++            // The migration loop below guards against missing sessions
++            // (`if (sessionData)`), so a bogus fallback device just becomes a no-op
++            // — extra device lookups are cheap and safe.
              const { device: fromDevice } = jidDecode(fromJid);
-             const fromDeviceStr = fromDevice?.toString() || '0';
+-            const fromDeviceStr = fromDevice?.toString() || '0';
 -            if (!userDevices.includes(fromDeviceStr)) {
+-                userDevices.push(fromDeviceStr);
++            const hintDeviceStr = hintDevice !== undefined && hintDevice !== null
++                ? String(hintDevice)
++                : null;
++            const fromDeviceStr = fromDevice !== undefined && fromDevice !== null
++                ? String(fromDevice)
++                : null;
 +            let { [user]: userDevices } = await parsedKeys.get('device-list', [user]);
 +            if (!userDevices || userDevices.length === 0) {
-+                // Empty device-list → fallback to fromJid's device. Logged so we can
-+                // observe how often the fallback path activates in production.
-+                logger.debug({ fromJid, fromDeviceStr }, 'device-list empty — falling back to fromJid device for migration (#2548)');
-+                userDevices = [fromDeviceStr];
-+            } else if (!userDevices.includes(fromDeviceStr)) {
-                 userDevices.push(fromDeviceStr);
++                const fallback = hintDeviceStr ?? fromDeviceStr ?? '0';
++                logger.debug({ fromJid, hintDevice: hintDeviceStr, fromDevice: fromDeviceStr, fallback }, 'device-list empty — using fallback device for migration (#2548 v2)');
++                userDevices = [fallback];
++            } else {
++                if (fromDeviceStr && !userDevices.includes(fromDeviceStr)) {
++                    userDevices.push(fromDeviceStr);
++                }
++                if (hintDeviceStr && !userDevices.includes(hintDeviceStr)) {
++                    userDevices.push(hintDeviceStr);
++                }
              }
              // Filter out cached devices before database fetch
+             const uncachedDevices = userDevices.filter(device => {
+diff --git a/node_modules/baileys/lib/Socket/messages-recv.js b/node_modules/baileys/lib/Socket/messages-recv.js
+index f2003ac..0a35a57 100644
+--- a/node_modules/baileys/lib/Socket/messages-recv.js
++++ b/node_modules/baileys/lib/Socket/messages-recv.js
+@@ -1277,17 +1277,23 @@ export const makeMessagesRecvSocket = (config) => {
+             const alt = msg.key.participantAlt || msg.key.remoteJidAlt;
+             // store new mappings we didn't have before
+             if (!!alt) {
+-                const altServer = jidDecode(alt)?.server;
++                const altDecoded = jidDecode(alt);
++                const altServer = altDecoded?.server;
+                 const primaryJid = msg.key.participant || msg.key.remoteJid;
+                 if (altServer === 'lid') {
+                     if (!(await signalRepository.lidMapping.getPNForLID(alt))) {
+                         await signalRepository.lidMapping.storeLIDPNMappings([{ lid: alt, pn: primaryJid }]);
+-                        await signalRepository.migrateSession(primaryJid, alt);
++                        // Issue #2548 V2: pass device from LID side (alt) as hint
++                        // when primaryJid (PN) is bare. Multi-device peers (linked
++                        // desktop with device :N) get correctly migrated.
++                        await signalRepository.migrateSession(primaryJid, alt, altDecoded?.device);
+                     }
+                 }
+                 else {
+                     await signalRepository.lidMapping.storeLIDPNMappings([{ lid: primaryJid, pn: alt }]);
+-                    await signalRepository.migrateSession(alt, primaryJid);
++                    // primaryJid is LID here; pass its device as hint when alt (PN) is bare.
++                    const primaryDevice = jidDecode(primaryJid)?.device;
++                    await signalRepository.migrateSession(alt, primaryJid, primaryDevice);
+                 }
+             }
+             await messageMutex.mutex(async () => {
+diff --git a/node_modules/baileys/lib/Types/Signal.d.ts b/node_modules/baileys/lib/Types/Signal.d.ts
+index 00e3cda..c4319f5 100644
+--- a/node_modules/baileys/lib/Types/Signal.d.ts
++++ b/node_modules/baileys/lib/Types/Signal.d.ts
+@@ -68,7 +68,19 @@ export type SignalRepository = {
+         reason?: string;
+     }>;
+     jidToSignalProtocolAddress(jid: string): string;
+-    migrateSession(fromJid: string, toJid: string): Promise<{
++    /**
++     * Migrate a PN session to a LID session, copying signal storage entries
++     * from `<user>.<device>` to `<user>_1.<device>` (V2: device-aware).
++     *
++     * @param fromJid  source PN JID (must be PN or hosted-PN)
++     * @param toJid    target LID JID (must be LID or hosted-LID)
++     * @param hintDevice  optional device hint (number | string) when the caller
++     *                    knows the active peer device but `fromJid` is bare
++     *                    (e.g. `stanza.attrs.from` without `:N`). Takes priority
++     *                    over `jidDecode(fromJid).device` for the empty-list
++     *                    fallback path. See issue #2548 V2.
++     */
++    migrateSession(fromJid: string, toJid: string, hintDevice?: number | string): Promise<{
+         migrated: number;
+         skipped: number;
+         total: number;
+diff --git a/node_modules/baileys/lib/Utils/decode-wa-message.js b/node_modules/baileys/lib/Utils/decode-wa-message.js
+index f2bc922..e5f56d2 100644
+--- a/node_modules/baileys/lib/Utils/decode-wa-message.js
++++ b/node_modules/baileys/lib/Utils/decode-wa-message.js
+@@ -1,6 +1,6 @@
+ import { Boom } from '@hapi/boom';
+ import { proto } from '../../WAProto/index.js';
+-import { areJidsSameUser, isHostedLidUser, isHostedPnUser, isJidBroadcast, isJidGroup, isJidMetaAI, isJidNewsletter, isJidStatusBroadcast, isLidUser, isPnUser
++import { areJidsSameUser, isHostedLidUser, isHostedPnUser, isJidBroadcast, isJidGroup, isJidMetaAI, isJidNewsletter, isJidStatusBroadcast, isLidUser, isPnUser, jidDecode
+ //	transferDevice
+  } from '../WABinary/index.js';
+ import { unpadRandomMax16 } from './generics.js';
+@@ -17,8 +17,14 @@ const storeMappingFromEnvelope = async (stanza, sender, repository, decryptionJi
+     if (senderAlt && isLidUser(senderAlt) && isPnUser(sender) && decryptionJid === sender) {
+         try {
+             await repository.lidMapping.storeLIDPNMappings([{ lid: senderAlt, pn: sender }]);
+-            await repository.migrateSession(sender, senderAlt);
+-            logger.debug({ sender, senderAlt }, 'Stored LID mapping from envelope');
++            // Issue #2548 V2: when `sender` (= stanza.attrs.from for 1:1 PN msgs) is
++            // bare, jidDecode(sender).device returns undefined and migrateSession
++            // falls back to '0'. If the peer's active session lives at `<user>.N`
++            // (linked desktop, N > 0), the migration silently does nothing.
++            // Extract device hint from senderAlt (LID side often carries `:N`).
++            const hintDevice = jidDecode(senderAlt)?.device;
++            await repository.migrateSession(sender, senderAlt, hintDevice);
++            logger.debug({ sender, senderAlt, hintDevice }, 'Stored LID mapping from envelope');
+         }
+         catch (error) {
+             logger.warn({ sender, senderAlt, error }, 'Failed to store LID mapping');
