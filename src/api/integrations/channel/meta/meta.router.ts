@@ -56,6 +56,25 @@ export class MetaRouter extends RouterBroker {
       })
       .post(this.routerPath('webhook/meta', false), verifyMetaSignature(configService), async (req, res) => {
         const { body } = req;
+        // [DIAG-CLOUD-WEBHOOK] dump completo do payload recebido da Meta —
+        // diagnostico para o bug de video missing (2026-05-22). Loga campos
+        // de alto nível e o messages[0] inteiro (incluindo o tipo) para que
+        // possamos confirmar se o webhook chega e qual o conteúdo.
+        try {
+          const entry = body?.entry?.[0];
+          const change = entry?.changes?.[0];
+          const value = change?.value;
+          const messages = value?.messages;
+          const m0 = Array.isArray(messages) ? messages[0] : undefined;
+          logger.info(`[DIAG-CLOUD-WEBHOOK] field=${change?.field} from=${m0?.from} type=${m0?.type} wamid=${m0?.id}`);
+          if (m0) {
+            logger.info(`[DIAG-CLOUD-WEBHOOK] message=${JSON.stringify(m0)}`);
+          } else {
+            logger.info(`[DIAG-CLOUD-WEBHOOK] no-messages value=${JSON.stringify(value).slice(0, 1000)}`);
+          }
+        } catch (logErr) {
+          logger.warn(`[DIAG-CLOUD-WEBHOOK] log failed: ${(logErr as Error).message}`);
+        }
         const response = await metaController.receiveWebhook(body);
         return res.status(200).json(response);
       });
