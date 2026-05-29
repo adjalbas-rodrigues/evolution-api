@@ -90,6 +90,7 @@ import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { status } from '@utils/renderStatus';
+import { sanitizeLabelName } from '@utils/sanitizeLabelName';
 import { sendTelemetry } from '@utils/sendTelemetry';
 import useMultiFileAuthStatePrisma from '@utils/use-multi-file-auth-state-prisma';
 import { AuthStateProvider } from '@utils/use-multi-file-auth-state-provider-files';
@@ -2132,7 +2133,7 @@ export class BaileysStartupService extends ChannelStartupService {
         return;
       }
 
-      const labelName = label.name.replace(/[^\x20-\x7E]/g, '');
+      const labelName = sanitizeLabelName(label.name);
       if (!savedLabel || savedLabel.color !== `${label.color}` || savedLabel.name !== labelName) {
         if (this.configService.get<Database>('DATABASE').SAVE_DATA.LABELS) {
           const labelData = {
